@@ -37,6 +37,7 @@ var (
 		"decimals":     2,
 		"on_delete":    2,
 		"type":         2,
+        "comment":      2,
 	}
 )
 

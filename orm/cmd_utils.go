@@ -145,9 +145,22 @@ func getDbCreateSql(al *alias) (sqls []string, tableIndexes map[string][]dbIndex
 					column += " " + "NOT NULL"
 				}
 
+                if fi.initial.Exist() {
+                    v := fi.initial.String()
+                    if strings.Index(v,"'") == -1 {
+                        column += " " + "DEFAULT '"+ v +"'"
+                    } else {
+                        column += " " + "DEFAULT "+ v
+                    }
+                }
+
 				if fi.unique {
 					column += " " + "UNIQUE"
 				}
+
+                if len(fi.comment) > 0 {
+                    column += " COMMENT '" + fi.comment + "'"
+                }
 
 				if fi.index {
 					sqlIndexes = append(sqlIndexes, []string{fi.column})
@@ -180,7 +193,7 @@ func getDbCreateSql(al *alias) (sqls []string, tableIndexes map[string][]dbIndex
 		sql += "\n)"
 
 		if al.Driver == DR_MySQL {
-			sql += " ENGINE=INNODB"
+			sql += " ENGINE=INNODB DEFAULT CHARSET=utf8"
 		}
 
 		sql += ";"

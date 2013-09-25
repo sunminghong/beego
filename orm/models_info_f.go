@@ -111,6 +111,7 @@ type fieldInfo struct {
 	decimals            int
 	isFielder           bool
 	onDelete            string
+    comment             string
 }
 
 func newFieldInfo(mi *modelInfo, field reflect.Value, sf reflect.StructField) (fi *fieldInfo, err error) {
@@ -214,6 +215,14 @@ checkType:
 		if fieldType == TypeDateTimeField && tags["type"] == "date" {
 			fieldType = TypeDateField
 		}
+
+		if fieldType == TypeIntegerField && tags["type"] == "tinyint" {
+			fieldType = TypeBitField
+		}
+		if fieldType == TypeIntegerField && tags["type"] == "smallint" {
+			fieldType = TypeSmallIntegerField
+		}
+
 	}
 
 	switch fieldType {
@@ -251,6 +260,7 @@ checkType:
 	fi.auto = attrs["auto"]
 	fi.pk = attrs["pk"]
 	fi.unique = attrs["unique"]
+	fi.comment = tags["comment"]
 
 	switch fieldType {
 	case RelManyToMany, RelReverseMany, RelReverseOne:
