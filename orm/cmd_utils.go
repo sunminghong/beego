@@ -230,3 +230,16 @@ func getDbCreateSql(al *alias) (sqls []string, tableIndexes map[string][]dbIndex
 
 	return
 }
+/*
+
+var pyString []string=[]string{}
+func generatePythonModel(field string,isInt bool,defaulValue string) {
+    if isInt {
+        if defaultValue == "" {
+            defaultValue = "0"
+        }
+    }
+
+    pyString = append(pyString,fmt.Sprintf("    %s = %s\n",field,defaultValue))
+
+}*/

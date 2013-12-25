@@ -216,6 +216,10 @@ checkType:
 			fieldType = TypeDateField
 		}
 
+		if fieldType == TypeIntegerField && tags["type"] == "bigint" {
+			fieldType = TypeBigIntegerField
+		}
+
 		if fieldType == TypeIntegerField && tags["type"] == "tinyint" {
 			fieldType = TypeBitField
 		}
