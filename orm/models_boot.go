@@ -14,7 +14,7 @@ func registerModel(model interface{}, prefix string) {
 	typ := ind.Type()
 
 	if val.Kind() != reflect.Ptr {
-		panic(fmt.Sprintf("<orm.RegisterModel> cannot use non-ptr model struct `%s`", getFullName(typ)))
+		panic(fmt.Errorf("<orm.RegisterModel> cannot use non-ptr model struct `%s`", getFullName(typ)))
 	}
 
 	table := getTableName(val)
@@ -106,9 +106,7 @@ func bootStrap() {
 						msg := fmt.Sprintf("field `%s` wrong rel_through value `%s`", fi.fullName, fi.relThrough)
 						if i := strings.LastIndex(fi.relThrough, "."); i != -1 && len(fi.relThrough) > (i+1) {
 							pn := fi.relThrough[:i]
-							mn := fi.relThrough[i+1:]
-							tn := snakeString(mn)
-							rmi, ok := modelCache.get(tn)
+							rmi, ok := modelCache.getByFN(fi.relThrough)
 							if ok == false || pn != rmi.pkg {
 								err = errors.New(msg + " cannot find table")
 								goto end
@@ -121,7 +119,6 @@ func bootStrap() {
 							err = errors.New(msg)
 							goto end
 						}
-						err = nil
 					} else {
 						i := newM2MModelInfo(mi, mii)
 						if fi.relTable != "" {
@@ -135,6 +132,8 @@ func bootStrap() {
 						fi.relTable = i.table
 						fi.relThroughModelInfo = i
 					}
+
+					fi.relThroughModelInfo.isThrough = true
 				}
 			}
 		}
@@ -152,6 +151,7 @@ func bootStrap() {
 						break
 					}
 				}
+
 				if inModel == false {
 					rmi := fi.relModelInfo
 					ffi := new(fieldInfo)
@@ -177,7 +177,7 @@ func bootStrap() {
 							}
 						}
 						if added == false {
-							panic(fmt.Sprintf("cannot generate auto reverse field info `%s` to `%s`", fi.fullName, ffi.fullName))
+							panic(fmt.Errorf("cannot generate auto reverse field info `%s` to `%s`", fi.fullName, ffi.fullName))
 						}
 					}
 				}
@@ -185,9 +185,38 @@ func bootStrap() {
 		}
 	}
 
+	models = modelCache.all()
 	for _, mi := range models {
-		if fields, ok := mi.fields.fieldsByType[RelReverseOne]; ok {
-			for _, fi := range fields {
+		for _, fi := range mi.fields.fieldsRel {
+			switch fi.fieldType {
+			case RelManyToMany:
+				for _, ffi := range fi.relThroughModelInfo.fields.fieldsRel {
+					switch ffi.fieldType {
+					case RelOneToOne, RelForeignKey:
+						if ffi.relModelInfo == fi.relModelInfo {
+							fi.reverseFieldInfoTwo = ffi
+						}
+						if ffi.relModelInfo == mi {
+							fi.reverseField = ffi.name
+							fi.reverseFieldInfo = ffi
+						}
+					}
+				}
+
+				if fi.reverseFieldInfoTwo == nil {
+					err = fmt.Errorf("can not find m2m field for m2m model `%s`, ensure your m2m model defined correct",
+						fi.relThroughModelInfo.fullName)
+					goto end
+				}
+			}
+		}
+	}
+
+	models = modelCache.all()
+	for _, mi := range models {
+		for _, fi := range mi.fields.fieldsReverse {
+			switch fi.fieldType {
+			case RelReverseOne:
 				found := false
 			mForA:
 				for _, ffi := range fi.relModelInfo.fields.fieldsByType[RelOneToOne] {
@@ -195,6 +224,9 @@ func bootStrap() {
 						found = true
 						fi.reverseField = ffi.name
 						fi.reverseFieldInfo = ffi
+
+						ffi.reverseField = fi.name
+						ffi.reverseFieldInfo = fi
 						break mForA
 					}
 				}
@@ -202,10 +234,7 @@ func bootStrap() {
 					err = fmt.Errorf("reverse field `%s` not found in model `%s`", fi.fullName, fi.relModelInfo.fullName)
 					goto end
 				}
-			}
-		}
-		if fields, ok := mi.fields.fieldsByType[RelReverseMany]; ok {
-			for _, fi := range fields {
+			case RelReverseMany:
 				found := false
 			mForB:
 				for _, ffi := range fi.relModelInfo.fields.fieldsByType[RelForeignKey] {
@@ -213,6 +242,10 @@ func bootStrap() {
 						found = true
 						fi.reverseField = ffi.name
 						fi.reverseFieldInfo = ffi
+
+						ffi.reverseField = fi.name
+						ffi.reverseFieldInfo = fi
+
 						break mForB
 					}
 				}
@@ -221,14 +254,20 @@ func bootStrap() {
 					for _, ffi := range fi.relModelInfo.fields.fieldsByType[RelManyToMany] {
 						if ffi.relModelInfo == mi {
 							found = true
-							fi.reverseField = ffi.name
-							fi.reverseFieldInfo = ffi
+
+							fi.reverseField = ffi.reverseFieldInfoTwo.name
+							fi.reverseFieldInfo = ffi.reverseFieldInfoTwo
+							fi.relThroughModelInfo = ffi.relThroughModelInfo
+							fi.reverseFieldInfoTwo = ffi.reverseFieldInfo
+							fi.reverseFieldInfoM2M = ffi
+							ffi.reverseFieldInfoM2M = fi
+
 							break mForC
 						}
 					}
 				}
 				if found == false {
-					err = fmt.Errorf("reverse field `%s` not found in model `%s`", fi.fullName, fi.relModelInfo.fullName)
+					err = fmt.Errorf("reverse field for `%s` not found in model `%s`", fi.fullName, fi.relModelInfo.fullName)
 					goto end
 				}
 			}

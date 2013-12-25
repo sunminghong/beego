@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"mime"
 	"net/http"
@@ -17,26 +18,23 @@ import (
 )
 
 type BeegoOutput struct {
-	context    *Context
+	Context    *Context
 	Status     int
 	EnableGzip bool
-	res        http.ResponseWriter
 }
 
-func NewOutput(res http.ResponseWriter) *BeegoOutput {
-	return &BeegoOutput{
-		res: res,
-	}
+func NewOutput() *BeegoOutput {
+	return &BeegoOutput{}
 }
 
 func (output *BeegoOutput) Header(key, val string) {
-	output.res.Header().Set(key, val)
+	output.Context.ResponseWriter.Header().Set(key, val)
 }
 
 func (output *BeegoOutput) Body(content []byte) {
-	output_writer := output.res.(io.Writer)
-	if output.EnableGzip == true && output.context.Input.Header("Accept-Encoding") != "" {
-		splitted := strings.SplitN(output.context.Input.Header("Accept-Encoding"), ",", -1)
+	output_writer := output.Context.ResponseWriter.(io.Writer)
+	if output.EnableGzip == true && output.Context.Input.Header("Accept-Encoding") != "" {
+		splitted := strings.SplitN(output.Context.Input.Header("Accept-Encoding"), ",", -1)
 		encodings := make([]string, len(splitted))
 
 		for i, val := range splitted {
@@ -45,12 +43,12 @@ func (output *BeegoOutput) Body(content []byte) {
 		for _, val := range encodings {
 			if val == "gzip" {
 				output.Header("Content-Encoding", "gzip")
-				output_writer, _ = gzip.NewWriterLevel(output.res, gzip.BestSpeed)
+				output_writer, _ = gzip.NewWriterLevel(output.Context.ResponseWriter, gzip.BestSpeed)
 
 				break
 			} else if val == "deflate" {
 				output.Header("Content-Encoding", "deflate")
-				output_writer, _ = flate.NewWriter(output.res, flate.BestSpeed)
+				output_writer, _ = flate.NewWriter(output.Context.ResponseWriter, flate.BestSpeed)
 				break
 			}
 		}
@@ -63,8 +61,6 @@ func (output *BeegoOutput) Body(content []byte) {
 		output_writer.(*gzip.Writer).Close()
 	case *flate.Writer:
 		output_writer.(*flate.Writer).Close()
-	case io.WriteCloser:
-		output_writer.(io.WriteCloser).Close()
 	}
 }
 
@@ -105,7 +101,7 @@ func (output *BeegoOutput) Cookie(name string, value string, others ...interface
 	if len(others) > 4 {
 		fmt.Fprintf(&b, "; HttpOnly")
 	}
-	output.res.Header().Add("Set-Cookie", b.String())
+	output.Context.ResponseWriter.Header().Add("Set-Cookie", b.String())
 }
 
 var cookieNameSanitizer = strings.NewReplacer("\n", "-", "\r", "-")
@@ -120,27 +116,44 @@ func sanitizeValue(v string) string {
 	return cookieValueSanitizer.Replace(v)
 }
 
-func (output *BeegoOutput) Json(data string) error {
+func (output *BeegoOutput) Json(data interface{}, hasIndent bool, coding bool) error {
 	output.Header("Content-Type", "application/json;charset=UTF-8")
-	content, err := json.Marshal(data)
+	var content []byte
+	var err error
+	if hasIndent {
+		content, err = json.MarshalIndent(data, "", "  ")
+	} else {
+		content, err = json.Marshal(data)
+	}
 	if err != nil {
+		http.Error(output.Context.ResponseWriter, err.Error(), http.StatusInternalServerError)
 		return err
+	}
+	if coding {
+		content = []byte(stringsToJson(string(content)))
 	}
 	output.Body(content)
 	return nil
 }
 
-func (output *BeegoOutput) Jsonp(data string) error {
+func (output *BeegoOutput) Jsonp(data interface{}, hasIndent bool) error {
 	output.Header("Content-Type", "application/javascript;charset=UTF-8")
-	content, err := json.Marshal(data)
+	var content []byte
+	var err error
+	if hasIndent {
+		content, err = json.MarshalIndent(data, "", "  ")
+	} else {
+		content, err = json.Marshal(data)
+	}
 	if err != nil {
+		http.Error(output.Context.ResponseWriter, err.Error(), http.StatusInternalServerError)
 		return err
 	}
-	callback := output.context.Input.Query("callback")
+	callback := output.Context.Input.Query("callback")
 	if callback == "" {
 		return errors.New(`"callback" parameter required`)
 	}
-	callback_content := bytes.NewBufferString(callback)
+	callback_content := bytes.NewBufferString(" " + template.JSEscapeString(callback))
 	callback_content.WriteString("(")
 	callback_content.Write(content)
 	callback_content.WriteString(");\r\n")
@@ -148,10 +161,17 @@ func (output *BeegoOutput) Jsonp(data string) error {
 	return nil
 }
 
-func (output *BeegoOutput) Xml(data string) error {
+func (output *BeegoOutput) Xml(data interface{}, hasIndent bool) error {
 	output.Header("Content-Type", "application/xml;charset=UTF-8")
-	content, err := xml.Marshal(data)
+	var content []byte
+	var err error
+	if hasIndent {
+		content, err = xml.MarshalIndent(data, "", "  ")
+	} else {
+		content, err = xml.Marshal(data)
+	}
 	if err != nil {
+		http.Error(output.Context.ResponseWriter, err.Error(), http.StatusInternalServerError)
 		return err
 	}
 	output.Body(content)
@@ -166,7 +186,7 @@ func (output *BeegoOutput) Download(file string) {
 	output.Header("Expires", "0")
 	output.Header("Cache-Control", "must-revalidate")
 	output.Header("Pragma", "public")
-	http.ServeFile(output.res, output.context.Request, file)
+	http.ServeFile(output.Context.ResponseWriter, output.Context.Request, file)
 }
 
 func (output *BeegoOutput) ContentType(ext string) {
@@ -180,7 +200,7 @@ func (output *BeegoOutput) ContentType(ext string) {
 }
 
 func (output *BeegoOutput) SetStatus(status int) {
-	output.res.WriteHeader(status)
+	output.Context.ResponseWriter.WriteHeader(status)
 	output.Status = status
 }
 
@@ -218,4 +238,22 @@ func (output *BeegoOutput) IsClientError(status int) bool {
 
 func (output *BeegoOutput) IsServerError(status int) bool {
 	return output.Status >= 500 && output.Status < 600
+}
+
+func stringsToJson(str string) string {
+	rs := []rune(str)
+	jsons := ""
+	for _, r := range rs {
+		rint := int(r)
+		if rint < 128 {
+			jsons += string(r)
+		} else {
+			jsons += "\\u" + strconv.FormatInt(int64(rint), 16) // json
+		}
+	}
+	return jsons
+}
+
+func (output *BeegoOutput) Session(name interface{}, value interface{}) {
+	output.Context.Input.CruSession.Set(name, value)
 }

@@ -6,16 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"github.com/astaxie/beego/utils"
 )
 
 var (
 	beegoTplFuncMap template.FuncMap
-	BeeTemplates    map[string]*template.Template
-	BeeTemplateExt  []string
+	// beego template caching map and supported template file extensions.
+	BeeTemplates   map[string]*template.Template
+	BeeTemplateExt []string
 )
 
 func init() {
@@ -32,13 +36,23 @@ func init() {
 	beegoTplFuncMap["htmlquote"] = Htmlquote
 	beegoTplFuncMap["htmlunquote"] = Htmlunquote
 	beegoTplFuncMap["renderform"] = RenderForm
+	beegoTplFuncMap["assets_js"] = AssetsJs
+	beegoTplFuncMap["assets_css"] = AssetsCss
+
+	// go1.2 added template funcs
+	// Comparisons
+	beegoTplFuncMap["eq"] = eq // ==
+	beegoTplFuncMap["ge"] = ge // >=
+	beegoTplFuncMap["gt"] = gt // >
+	beegoTplFuncMap["le"] = le // <=
+	beegoTplFuncMap["lt"] = lt // <
+	beegoTplFuncMap["ne"] = ne // !=
+
+	beegoTplFuncMap["urlfor"] = UrlFor // !=
 }
 
-// AddFuncMap let user to register a func in the template
+// AddFuncMap let user to register a func in the template.
 func AddFuncMap(key string, funname interface{}) error {
-	if _, ok := beegoTplFuncMap[key]; ok {
-		return errors.New("funcmap already has the key")
-	}
 	beegoTplFuncMap[key] = funname
 	return nil
 }
@@ -55,26 +69,28 @@ func (self *templatefile) visit(paths string, f os.FileInfo, err error) error {
 	if f.IsDir() || (f.Mode()&os.ModeSymlink) > 0 {
 		return nil
 	}
-	if !HasTemplateEXt(paths) {
+	if !HasTemplateExt(paths) {
 		return nil
 	}
 
 	replace := strings.NewReplacer("\\", "/")
 	a := []byte(paths)
 	a = a[len([]byte(self.root)):]
-	subdir := path.Dir(strings.TrimLeft(replace.Replace(string(a)), "/"))
+	file := strings.TrimLeft(replace.Replace(string(a)), "/")
+	subdir := filepath.Dir(file)
 	if _, ok := self.files[subdir]; ok {
-		self.files[subdir] = append(self.files[subdir], paths)
+		self.files[subdir] = append(self.files[subdir], file)
 	} else {
 		m := make([]string, 1)
-		m[0] = paths
+		m[0] = file
 		self.files[subdir] = m
 	}
 
 	return nil
 }
 
-func HasTemplateEXt(paths string) bool {
+// return this path contains supported template extension of beego or not.
+func HasTemplateExt(paths string) bool {
 	for _, v := range BeeTemplateExt {
 		if strings.HasSuffix(paths, "."+v) {
 			return true
@@ -83,6 +99,7 @@ func HasTemplateEXt(paths string) bool {
 	return false
 }
 
+// add new extension for template.
 func AddTemplateExt(ext string) {
 	for _, v := range BeeTemplateExt {
 		if v == ext {
@@ -92,6 +109,8 @@ func AddTemplateExt(ext string) {
 	BeeTemplateExt = append(BeeTemplateExt, ext)
 }
 
+// build all template files in a directory.
+// it makes beego can render any template file in view directory.
 func BuildTemplate(dir string) error {
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
@@ -100,7 +119,7 @@ func BuildTemplate(dir string) error {
 			return errors.New("dir open err")
 		}
 	}
-	self := templatefile{
+	self := &templatefile{
 		root:  dir,
 		files: make(map[string][]string),
 	}
@@ -111,8 +130,117 @@ func BuildTemplate(dir string) error {
 		fmt.Printf("filepath.Walk() returned %v\n", err)
 		return err
 	}
-	for k, v := range self.files {
-		BeeTemplates[k] = template.Must(template.New("beegoTemplate"+k).Delims(TemplateLeft, TemplateRight).Funcs(beegoTplFuncMap).ParseFiles(v...))
+	for _, v := range self.files {
+		for _, file := range v {
+			t, err := getTemplate(self.root, file, v...)
+			if err != nil {
+				Trace("parse template err:", file, err)
+			} else {
+				BeeTemplates[file] = t
+			}
+		}
 	}
 	return nil
+}
+
+func getTplDeep(root, file, parent string, t *template.Template) (*template.Template, [][]string, error) {
+	var fileabspath string
+	if filepath.HasPrefix(file, "../") {
+		fileabspath = filepath.Join(root, filepath.Dir(parent), file)
+	} else {
+		fileabspath = filepath.Join(root, file)
+	}
+	if e := utils.FileExists(fileabspath); !e {
+		panic("can't find template file" + file)
+	}
+	data, err := ioutil.ReadFile(fileabspath)
+	if err != nil {
+		return nil, [][]string{}, err
+	}
+	t, err = t.New(file).Parse(string(data))
+	if err != nil {
+		return nil, [][]string{}, err
+	}
+	reg := regexp.MustCompile(TemplateLeft + "[ ]*template[ ]+\"([^\"]+)\"")
+	allsub := reg.FindAllStringSubmatch(string(data), -1)
+	for _, m := range allsub {
+		if len(m) == 2 {
+			tlook := t.Lookup(m[1])
+			if tlook != nil {
+				continue
+			}
+			if !HasTemplateExt(m[1]) {
+				continue
+			}
+			t, _, err = getTplDeep(root, m[1], file, t)
+			if err != nil {
+				return nil, [][]string{}, err
+			}
+		}
+	}
+	return t, allsub, nil
+}
+
+func getTemplate(root, file string, others ...string) (t *template.Template, err error) {
+	t = template.New(file).Delims(TemplateLeft, TemplateRight).Funcs(beegoTplFuncMap)
+	var submods [][]string
+	t, submods, err = getTplDeep(root, file, "", t)
+	if err != nil {
+		return nil, err
+	}
+	t, err = _getTemplate(t, root, submods, others...)
+
+	if err != nil {
+		return nil, err
+	}
+	return
+}
+
+func _getTemplate(t0 *template.Template, root string, submods [][]string, others ...string) (t *template.Template, err error) {
+	t = t0
+	for _, m := range submods {
+		if len(m) == 2 {
+			templ := t.Lookup(m[1])
+			if templ != nil {
+				continue
+			}
+			//first check filename
+			for _, otherfile := range others {
+				if otherfile == m[1] {
+					var submods1 [][]string
+					t, submods1, err = getTplDeep(root, otherfile, "", t)
+					if err != nil {
+						Trace("template parse file err:", err)
+					} else if submods1 != nil && len(submods1) > 0 {
+						t, err = _getTemplate(t, root, submods1, others...)
+					}
+					break
+				}
+			}
+			//second check define
+			for _, otherfile := range others {
+				fileabspath := filepath.Join(root, otherfile)
+				data, err := ioutil.ReadFile(fileabspath)
+				if err != nil {
+					continue
+				}
+				reg := regexp.MustCompile(TemplateLeft + "[ ]*define[ ]+\"([^\"]+)\"")
+				allsub := reg.FindAllStringSubmatch(string(data), -1)
+				for _, sub := range allsub {
+					if len(sub) == 2 && sub[1] == m[1] {
+						var submods1 [][]string
+						t, submods1, err = getTplDeep(root, otherfile, "", t)
+						if err != nil {
+							Trace("template parse file err:", err)
+						} else if submods1 != nil && len(submods1) > 0 {
+							t, err = _getTemplate(t, root, submods1, others...)
+						}
+						break
+					}
+				}
+			}
+		}
+
+	}
+	return
 }

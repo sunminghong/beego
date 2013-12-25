@@ -2,16 +2,16 @@
 
 [![Build Status](https://drone.io/github.com/astaxie/beego/status.png)](https://drone.io/github.com/astaxie/beego/latest)
 
-beego is a Go Framework which is inspired from tornado and sinatra.
+beego is a Go Framework inspired by tornado and sinatra.
 
-It is a simply & powerful web framework.
+It is a simple & powerful web framework.
 
-more info [beego.me](http://beego.me)
+More info [beego.me](http://beego.me)
 
 ## Features
 
-* RESTFul support
-* MVC architecture 
+* RESTful support
+* MVC architecture
 * Session support (store in memory, file, Redis or MySQL)
 * Cache support (store in memory, Redis or Memcache)
 * Global Config
@@ -23,11 +23,11 @@ more info [beego.me](http://beego.me)
 
 ## Documentation
 
-[English](http://beego.me/docs/Overview_Introduction?lang=en&q=)
+[English](http://beego.me/docs/intro/)
 
 [API](http://gowalker.org/github.com/astaxie/beego)
 
-[中文文档](http://beego.me/docs/Overview_Introduction?lang=zh&q=)
+[中文文档](http://beego.me/docs/intro/)
 
 
 ## LICENSE

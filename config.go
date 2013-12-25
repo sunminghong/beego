@@ -1,208 +1,314 @@
 package beego
 
 import (
-	"bufio"
-	"bytes"
-	"errors"
-	"io"
+	"html/template"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"unicode"
+
+	"github.com/astaxie/beego/config"
+	"github.com/astaxie/beego/logs"
+	"github.com/astaxie/beego/session"
 )
 
 var (
-	bComment = []byte{'#'}
-	bEmpty   = []byte{}
-	bEqual   = []byte{'='}
-	bDQuote  = []byte{'"'}
+	BeeApp                 *App // beego application
+	AppName                string
+	AppPath                string
+	AppConfigPath          string
+	StaticDir              map[string]string
+	TemplateCache          map[string]*template.Template // template caching map
+	StaticExtensionsToGzip []string                      // files with should be compressed with gzip (.js,.css,etc)
+	HttpAddr               string
+	HttpPort               int
+	HttpTLS                bool
+	HttpCertFile           string
+	HttpKeyFile            string
+	RecoverPanic           bool // flag of auto recover panic
+	AutoRender             bool // flag of render template automatically
+	ViewsPath              string
+	RunMode                string // run mode, "dev" or "prod"
+	AppConfig              config.ConfigContainer
+	GlobalSessions         *session.Manager // global session mananger
+	SessionOn              bool             // flag of starting session auto. default is false.
+	SessionProvider        string           // default session provider, memory, mysql , redis ,etc.
+	SessionName            string           // the cookie name when saving session id into cookie.
+	SessionGCMaxLifetime   int64            // session gc time for auto cleaning expired session.
+	SessionSavePath        string           // if use mysql/redis/file provider, define save path to connection info.
+	SessionHashFunc        string           // session hash generation func.
+	SessionHashKey         string           // session hash salt string.
+	SessionCookieLifeTime  int              // the life time of session id in cookie.
+	UseFcgi                bool
+	MaxMemory              int64
+	EnableGzip             bool // flag of enable gzip
+	DirectoryIndex         bool // flag of display directory index. default is false.
+	EnableHotUpdate        bool // flag of hot update checking by app self. default is false.
+	HttpServerTimeOut      int64
+	ErrorsShow             bool   // flag of show errors in page. if true, show error and trace info in page rendered with error template.
+	XSRFKEY                string // xsrf hash salt string.
+	EnableXSRF             bool   // flag of enable xsrf.
+	XSRFExpire             int    // the expiry of xsrf value.
+	CopyRequestBody        bool   // flag of copy raw request body in context.
+	TemplateLeft           string
+	TemplateRight          string
+	BeegoServerName        string // beego server name exported in response header.
+	EnableAdmin            bool   // flag of enable admin module to log every request info.
+	AdminHttpAddr          string // http server configurations for admin module.
+	AdminHttpPort          int
 )
 
-// A Config represents the configuration.
-type Config struct {
-	filename string
-	comment  map[int][]string  // id: []{comment, key...}; id 1 is for main comment.
-	data     map[string]string // key: value
-	offset   map[string]int64  // key: offset; for editing.
-	sync.RWMutex
-}
+func init() {
+	// create beego application
+	BeeApp = NewApp()
 
-// ParseFile creates a new Config and parses the file configuration from the
-// named file.
-func LoadConfig(name string) (*Config, error) {
-	file, err := os.Open(name)
-	if err != nil {
-		return nil, err
+	// initialize default configurations
+	AppPath, _ = filepath.Abs(filepath.Dir(os.Args[0]))
+	os.Chdir(AppPath)
+
+	StaticDir = make(map[string]string)
+	StaticDir["/static"] = "static"
+
+	StaticExtensionsToGzip = []string{".css", ".js"}
+
+	TemplateCache = make(map[string]*template.Template)
+
+	// set this to 0.0.0.0 to make this app available to externally
+	HttpAddr = ""
+	HttpPort = 8080
+
+	AppName = "beego"
+
+	RunMode = "dev" //default runmod
+
+	AutoRender = true
+
+	RecoverPanic = true
+
+	ViewsPath = "views"
+
+	SessionOn = false
+	SessionProvider = "memory"
+	SessionName = "beegosessionID"
+	SessionGCMaxLifetime = 3600
+	SessionSavePath = ""
+	SessionHashFunc = "sha1"
+	SessionHashKey = "beegoserversessionkey"
+	SessionCookieLifeTime = 0 //set cookie default is the brower life
+
+	UseFcgi = false
+
+	MaxMemory = 1 << 26 //64MB
+
+	EnableGzip = false
+
+	AppConfigPath = filepath.Join(AppPath, "conf", "app.conf")
+
+	HttpServerTimeOut = 0
+
+	ErrorsShow = true
+
+	XSRFKEY = "beegoxsrf"
+	XSRFExpire = 0
+
+	TemplateLeft = "{{"
+	TemplateRight = "}}"
+
+	BeegoServerName = "beegoServer"
+
+	EnableAdmin = false
+	AdminHttpAddr = "127.0.0.1"
+	AdminHttpPort = 8088
+
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	// init BeeLogger
+	BeeLogger = logs.NewLogger(10000)
+	BeeLogger.SetLogger("console", "")
+
+	err := ParseConfig()
+	if err != nil && !os.IsNotExist(err) {
+		// for init if doesn't have app.conf will not panic
+		Info(err)
 	}
-
-	cfg := &Config{
-		file.Name(),
-		make(map[int][]string),
-		make(map[string]string),
-		make(map[string]int64),
-		sync.RWMutex{},
-	}
-	cfg.Lock()
-	defer cfg.Unlock()
-	defer file.Close()
-
-	var comment bytes.Buffer
-	buf := bufio.NewReader(file)
-
-	for nComment, off := 0, int64(1); ; {
-		line, _, err := buf.ReadLine()
-		if err == io.EOF {
-			break
-		}
-		if bytes.Equal(line, bEmpty) {
-			continue
-		}
-
-		off += int64(len(line))
-
-		if bytes.HasPrefix(line, bComment) {
-			line = bytes.TrimLeft(line, "#")
-			line = bytes.TrimLeftFunc(line, unicode.IsSpace)
-			comment.Write(line)
-			comment.WriteByte('\n')
-			continue
-		}
-		if comment.Len() != 0 {
-			cfg.comment[nComment] = []string{comment.String()}
-			comment.Reset()
-			nComment++
-		}
-
-		val := bytes.SplitN(line, bEqual, 2)
-		if bytes.HasPrefix([]byte(strings.TrimSpace(string(val[1]))), bDQuote) {
-			val[1] = bytes.Trim([]byte(strings.TrimSpace(string(val[1]))), `"`)
-		}
-
-		key := strings.TrimSpace(string(val[0]))
-		cfg.comment[nComment-1] = append(cfg.comment[nComment-1], key)
-		cfg.data[key] = strings.TrimSpace(string(val[1]))
-		cfg.offset[key] = off
-	}
-	return cfg, nil
 }
 
-// Bool returns the boolean value for a given key.
-func (c *Config) Bool(key string) (bool, error) {
-	return strconv.ParseBool(c.data[key])
-}
-
-// Int returns the integer value for a given key.
-func (c *Config) Int(key string) (int, error) {
-	return strconv.Atoi(c.data[key])
-}
-
-func (c *Config) Int64(key string) (int64, error) {
-	return strconv.ParseInt(c.data[key], 10, 64)
-}
-
-// Float returns the float value for a given key.
-func (c *Config) Float(key string) (float64, error) {
-	return strconv.ParseFloat(c.data[key], 64)
-}
-
-// String returns the string value for a given key.
-func (c *Config) String(key string) string {
-	return c.data[key]
-}
-
-// WriteValue writes a new value for key.
-func (c *Config) SetValue(key, value string) error {
-	c.Lock()
-	defer c.Unlock()
-
-	if _, found := c.data[key]; !found {
-		return errors.New("key not found: " + key)
-	}
-
-	c.data[key] = value
-	return nil
-}
-
+// ParseConfig parsed default config file.
+// now only support ini, next will support json.
 func ParseConfig() (err error) {
-	AppConfig, err = LoadConfig(AppConfigPath)
+	AppConfig, err = config.NewConfig("ini", AppConfigPath)
 	if err != nil {
 		return err
 	} else {
-		HttpAddr = AppConfig.String("httpaddr")
-		if v, err := AppConfig.Int("httpport"); err == nil {
+		HttpAddr = AppConfig.String("HttpAddr")
+
+		if v, err := AppConfig.Int("HttpPort"); err == nil {
 			HttpPort = v
 		}
-		if maxmemory, err := AppConfig.Int64("maxmemory"); err == nil {
+
+		if maxmemory, err := AppConfig.Int64("MaxMemory"); err == nil {
 			MaxMemory = maxmemory
 		}
-		AppName = AppConfig.String("appname")
-		if runmode := AppConfig.String("runmode"); runmode != "" {
+
+		if appname := AppConfig.String("AppName"); appname != "" {
+			AppName = appname
+		}
+
+		if runmode := AppConfig.String("RunMode"); runmode != "" {
 			RunMode = runmode
 		}
-		if autorender, err := AppConfig.Bool("autorender"); err == nil {
+
+		if autorender, err := AppConfig.Bool("AutoRender"); err == nil {
 			AutoRender = autorender
 		}
-		if autorecover, err := AppConfig.Bool("autorecover"); err == nil {
+
+		if autorecover, err := AppConfig.Bool("RecoverPanic"); err == nil {
 			RecoverPanic = autorecover
 		}
-		if pprofon, err := AppConfig.Bool("pprofon"); err == nil {
-			PprofOn = pprofon
-		}
-		if views := AppConfig.String("viewspath"); views != "" {
+
+		if views := AppConfig.String("ViewsPath"); views != "" {
 			ViewsPath = views
 		}
-		if sessionon, err := AppConfig.Bool("sessionon"); err == nil {
+
+		if sessionon, err := AppConfig.Bool("SessionOn"); err == nil {
 			SessionOn = sessionon
 		}
-		if sessProvider := AppConfig.String("sessionprovider"); sessProvider != "" {
+
+		if sessProvider := AppConfig.String("SessionProvider"); sessProvider != "" {
 			SessionProvider = sessProvider
 		}
-		if sessName := AppConfig.String("sessionname"); sessName != "" {
+
+		if sessName := AppConfig.String("SessionName"); sessName != "" {
 			SessionName = sessName
 		}
-		if sesssavepath := AppConfig.String("sessionsavepath"); sesssavepath != "" {
+
+		if sesssavepath := AppConfig.String("SessionSavePath"); sesssavepath != "" {
 			SessionSavePath = sesssavepath
 		}
-		if sessMaxLifeTime, err := AppConfig.Int("sessiongcmaxlifetime"); err == nil && sessMaxLifeTime != 0 {
+
+		if sesshashfunc := AppConfig.String("SessionHashFunc"); sesshashfunc != "" {
+			SessionHashFunc = sesshashfunc
+		}
+
+		if sesshashkey := AppConfig.String("SessionHashKey"); sesshashkey != "" {
+			SessionHashKey = sesshashkey
+		}
+
+		if sessMaxLifeTime, err := AppConfig.Int("SessionGCMaxLifetime"); err == nil && sessMaxLifeTime != 0 {
 			int64val, _ := strconv.ParseInt(strconv.Itoa(sessMaxLifeTime), 10, 64)
 			SessionGCMaxLifetime = int64val
 		}
-		if usefcgi, err := AppConfig.Bool("usefcgi"); err == nil {
+
+		if sesscookielifetime, err := AppConfig.Int("SessionCookieLifeTime"); err == nil && sesscookielifetime != 0 {
+			SessionCookieLifeTime = sesscookielifetime
+		}
+
+		if usefcgi, err := AppConfig.Bool("UseFcgi"); err == nil {
 			UseFcgi = usefcgi
 		}
-		if enablegzip, err := AppConfig.Bool("enablegzip"); err == nil {
+
+		if enablegzip, err := AppConfig.Bool("EnableGzip"); err == nil {
 			EnableGzip = enablegzip
 		}
-		if directoryindex, err := AppConfig.Bool("directoryindex"); err == nil {
+
+		if directoryindex, err := AppConfig.Bool("DirectoryIndex"); err == nil {
 			DirectoryIndex = directoryindex
 		}
-		if hotupdate, err := AppConfig.Bool("hotupdate"); err == nil {
+
+		if hotupdate, err := AppConfig.Bool("HotUpdate"); err == nil {
 			EnableHotUpdate = hotupdate
 		}
-		if timeout, err := AppConfig.Int64("httpservertimeout"); err == nil {
+
+		if timeout, err := AppConfig.Int64("HttpServerTimeOut"); err == nil {
 			HttpServerTimeOut = timeout
 		}
-		if errorsshow, err := AppConfig.Bool("errorsshow"); err == nil {
+
+		if errorsshow, err := AppConfig.Bool("ErrorsShow"); err == nil {
 			ErrorsShow = errorsshow
 		}
-		if copyrequestbody, err := AppConfig.Bool("copyrequestbody"); err == nil {
+
+		if copyrequestbody, err := AppConfig.Bool("CopyRequestBody"); err == nil {
 			CopyRequestBody = copyrequestbody
 		}
-		if xsrfkey := AppConfig.String("xsrfkey"); xsrfkey != "" {
+
+		if xsrfkey := AppConfig.String("XSRFKEY"); xsrfkey != "" {
 			XSRFKEY = xsrfkey
 		}
-		if enablexsrf, err := AppConfig.Bool("enablexsrf"); err == nil {
+
+		if enablexsrf, err := AppConfig.Bool("EnableXSRF"); err == nil {
 			EnableXSRF = enablexsrf
 		}
-		if expire, err := AppConfig.Int("xsrfexpire"); err == nil {
+
+		if expire, err := AppConfig.Int("XSRFExpire"); err == nil {
 			XSRFExpire = expire
 		}
-		if tplleft := AppConfig.String("templateleft"); tplleft != "" {
+
+		if tplleft := AppConfig.String("TemplateLeft"); tplleft != "" {
 			TemplateLeft = tplleft
 		}
-		if tplright := AppConfig.String("templateright"); tplright != "" {
+
+		if tplright := AppConfig.String("TemplateRight"); tplright != "" {
 			TemplateRight = tplright
+		}
+
+		if httptls, err := AppConfig.Bool("HttpTLS"); err == nil {
+			HttpTLS = httptls
+		}
+
+		if certfile := AppConfig.String("HttpCertFile"); certfile != "" {
+			HttpCertFile = certfile
+		}
+
+		if keyfile := AppConfig.String("HttpKeyFile"); keyfile != "" {
+			HttpKeyFile = keyfile
+		}
+
+		if serverName := AppConfig.String("BeegoServerName"); serverName != "" {
+			BeegoServerName = serverName
+		}
+
+		if sd := AppConfig.String("StaticDir"); sd != "" {
+			for k := range StaticDir {
+				delete(StaticDir, k)
+			}
+			sds := strings.Fields(sd)
+			for _, v := range sds {
+				if url2fsmap := strings.SplitN(v, ":", 2); len(url2fsmap) == 2 {
+					StaticDir["/"+url2fsmap[0]] = url2fsmap[1]
+				} else {
+					StaticDir["/"+url2fsmap[0]] = url2fsmap[0]
+				}
+			}
+		}
+
+		if sgz := AppConfig.String("StaticExtensionsToGzip"); sgz != "" {
+			extensions := strings.Split(sgz, ",")
+			if len(extensions) > 0 {
+				StaticExtensionsToGzip = []string{}
+				for _, ext := range extensions {
+					if len(ext) == 0 {
+						continue
+					}
+					extWithDot := ext
+					if extWithDot[:1] != "." {
+						extWithDot = "." + extWithDot
+					}
+					StaticExtensionsToGzip = append(StaticExtensionsToGzip, extWithDot)
+				}
+			}
+		}
+
+		if enableadmin, err := AppConfig.Bool("EnableAdmin"); err == nil {
+			EnableAdmin = enableadmin
+		}
+
+		if adminhttpaddr := AppConfig.String("AdminHttpAddr"); adminhttpaddr != "" {
+			AdminHttpAddr = adminhttpaddr
+		}
+
+		if adminhttpport, err := AppConfig.Int("AdminHttpPort"); err == nil {
+			AdminHttpPort = adminhttpport
 		}
 	}
 	return nil
